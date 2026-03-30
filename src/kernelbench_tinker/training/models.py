@@ -19,6 +19,8 @@ def get_renderer_name_for_model(model_name: str) -> str:
     """
     model_lower = model_name.lower()
 
+    if "gpt-oss" in model_lower or "gpt_oss" in model_lower:
+        return "gpt_oss_high_reasoning"
     if "qwen" in model_lower:
         return "qwen3"
     if "llama-3" in model_lower or "llama3" in model_lower:

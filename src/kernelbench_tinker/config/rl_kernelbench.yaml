@@ -16,24 +16,29 @@
 # =============================================================================
 # Model Configuration
 # =============================================================================
-model_name: "Qwen/Qwen3-30B-A3B"
-lora_rank: 64
-learning_rate: 0.000002  # 2e-6 as explicit float
+model_name: "openai/gpt-oss-120b"
+lora_rank: 32
+learning_rate: 0.00004
 
 # =============================================================================
 # Generation Configuration
 # =============================================================================
-max_tokens: 16384
+max_tokens: 32000
 temperature: 1.0
+use_two_phase_sampling: true
+phase1_max_tokens: 26000
+context_window: 32768
+context_buffer: 50
 
 # =============================================================================
 # Training Configuration
 # =============================================================================
-num_substeps: 2
+num_substeps: 1
 loss_fn: "importance_sampling"
+max_steps: 50
 
 # KL Regularization (optional)
-kl_penalty_coef: 0.0
+kl_penalty_coef: 0.1
 kl_discount_factor: 0.0
 
 # Remove groups with constant rewards (no learning signal)
@@ -43,7 +48,7 @@ remove_constant_reward_groups: true
 # Logging and Checkpointing
 # =============================================================================
 log_path: "./runs/default"
-save_every: 1
+save_every: 2
 
 # Weights & Biases (optional)
 wandb_project: kernelbench-tinker
@@ -71,15 +76,15 @@ dataset_builder:
     # Batching
     # ---------------------------------------------------------------------------
     batch_size: 8                 # Problems per batch
-    group_size: 16                # Rollouts per problem (for GRPO)
-    num_epochs: 22
+    group_size: 64                # Rollouts per problem (for GRPO)
+    num_epochs: 50
     shuffle: true
     test_fraction: 0.1            # Fraction of problems for test set
 
     # ---------------------------------------------------------------------------
     # Prompt Configuration
     # ---------------------------------------------------------------------------
-    renderer_name: "qwen3"        # Should match model family
+    renderer_name: "gpt_oss_high_reasoning"
     prompt_option: "one_shot"     # "zero_shot", "one_shot", "few_shot"
     prompt_precision: null
     prompt_include_hardware: false

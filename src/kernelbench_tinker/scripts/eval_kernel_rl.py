@@ -26,7 +26,6 @@ import tinker
 from tqdm import tqdm
 
 from tinker_cookbook import renderers, tokenizer_utils
-from tinker_cookbook.completers import TinkerTokenCompleter
 
 from kernelbench_tinker.env import setup_environment
 from kernelbench_tinker.envs.kernelbench_client import (
@@ -35,6 +34,7 @@ from kernelbench_tinker.envs.kernelbench_client import (
     get_problem_ids,
     parse_structured_response,
 )
+from kernelbench_tinker.training.completers import build_token_completer
 from kernelbench_tinker.training.models import get_renderer_name_for_model
 
 logger = logging.getLogger(__name__)
@@ -59,6 +59,10 @@ class EvalConfig:
     max_tokens: int = 4096
     temperature: float = 0.0  # Greedy for eval
     num_samples: int = 1  # Samples per problem
+    use_two_phase_sampling: bool = False
+    phase1_max_tokens: int = 26000
+    context_window: int = 32768
+    context_buffer: int = 50
 
     # Evaluation settings
     num_correct_trials: int = 5
@@ -105,8 +109,13 @@ async def generate_kernel(
     sampling_client: tinker.SamplingClient,
     problem: KernelBenchProblem,
     renderer: renderers.Renderer,
+    tokenizer: Any,
     max_tokens: int,
     temperature: float,
+    use_two_phase_sampling: bool,
+    phase1_max_tokens: int,
+    context_window: int,
+    context_buffer: int,
 ) -> str:
     """Generate a kernel for a problem."""
     # Build prompt
@@ -118,10 +127,15 @@ async def generate_kernel(
     stop_condition = renderer.get_stop_sequences()
 
     # Generate
-    completer = TinkerTokenCompleter(
-        sampling_client,
+    completer = build_token_completer(
+        sampling_client=sampling_client,
+        tokenizer=tokenizer,
         max_tokens=max_tokens,
         temperature=temperature,
+        use_two_phase_sampling=use_two_phase_sampling,
+        phase1_max_tokens=phase1_max_tokens,
+        context_window=context_window,
+        context_buffer=context_buffer,
     )
     result = await completer(observation, stop_condition)
 
@@ -140,6 +154,7 @@ async def evaluate_problem(
     sampling_client: tinker.SamplingClient,
     problem: KernelBenchProblem,
     renderer: renderers.Renderer,
+    tokenizer: Any,
     cfg: EvalConfig,
 ) -> EvalResult:
     """Evaluate a single problem with multiple samples."""
@@ -151,8 +166,13 @@ async def evaluate_problem(
             sampling_client,
             problem,
             renderer,
+            tokenizer,
             cfg.max_tokens,
             cfg.temperature if cfg.num_samples == 1 else 1.0,  # Use temp=1 for multiple samples
+            cfg.use_two_phase_sampling,
+            cfg.phase1_max_tokens,
+            cfg.context_window,
+            cfg.context_buffer,
         )
 
         # Evaluate
@@ -242,8 +262,8 @@ async def run_evaluation(cfg: EvalConfig) -> dict[str, Any]:
         sampling_client = service_client.create_sampling_client(base_model=cfg.model_name)
 
     # Get renderer
-    renderer_name = get_renderer_name_for_model(cfg.model_name)
     tokenizer = tokenizer_utils.get_tokenizer(cfg.model_name)
+    renderer_name = get_renderer_name_for_model(cfg.model_name)
     renderer = renderers.get_renderer(renderer_name, tokenizer)
 
     # Get problems
@@ -275,7 +295,7 @@ async def run_evaluation(cfg: EvalConfig) -> dict[str, Any]:
     for problem in tqdm(problems, desc="Evaluating"):
         try:
             result = await evaluate_problem(
-                sampling_client, problem, renderer, cfg
+                sampling_client, problem, renderer, tokenizer, cfg
             )
             results.append(result)
         except Exception as e:

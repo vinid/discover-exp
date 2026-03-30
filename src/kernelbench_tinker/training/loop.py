@@ -27,9 +27,7 @@ import torch
 from tinker.types import LossFnType
 
 from tinker_cookbook import checkpoint_utils
-from tinker_cookbook.completers import TinkerTokenCompleter
 from tinker_cookbook.rl.data_processing import (
-    assemble_training_data,
     compute_advantages,
     remove_constant_reward_groups,
 )
@@ -42,6 +40,8 @@ from tinker_cookbook.utils import ml_log
 from tinker_cookbook.utils.misc_utils import timed
 
 from kernelbench_tinker.envs.kernelbench_env import KernelBenchDatasetBuilder
+from kernelbench_tinker.training.completers import build_token_completer
+from kernelbench_tinker.training.data_processing import assemble_training_data
 from kernelbench_tinker.training.models import get_adam_params
 from kernelbench_tinker.training.tensorboard_logger import (
     TensorBoardConfig,
@@ -77,6 +77,10 @@ class TrainingConfig:
     # Generation configuration
     max_tokens: int = 4096
     temperature: float = 1.0
+    use_two_phase_sampling: bool = False
+    phase1_max_tokens: int = 26000
+    context_window: int = 32768
+    context_buffer: int = 50
 
     # Dataset configuration (single-turn default)
     dataset_builder: KernelBenchDatasetBuilder = chz.field(
@@ -86,6 +90,7 @@ class TrainingConfig:
     # Training configuration
     num_substeps: int = 1  # Optimizer steps per batch
     loss_fn: LossFnType = "importance_sampling"
+    max_steps: int | None = None
 
     # KL regularization
     kl_penalty_coef: float = 0.0
@@ -119,9 +124,14 @@ class TrainingConfig:
 async def do_group_rollout_and_filter(
     sampling_client: tinker.SamplingClient,
     env_group_builder: EnvGroupBuilder,
+    tokenizer: Any,
     max_tokens: int,
     temperature: float,
     do_remove_constant_reward_groups: bool,
+    use_two_phase_sampling: bool,
+    phase1_max_tokens: int,
+    context_window: int,
+    context_buffer: int,
 ) -> TrajectoryGroup | None:
     """
     Perform rollouts for a group and optionally filter constant reward groups.
@@ -136,10 +146,15 @@ async def do_group_rollout_and_filter(
     Returns:
         TrajectoryGroup or None if filtered out
     """
-    policy = TinkerTokenCompleter(
-        sampling_client,
+    policy = build_token_completer(
+        sampling_client=sampling_client,
+        tokenizer=tokenizer,
         max_tokens=max_tokens,
         temperature=temperature,
+        use_two_phase_sampling=use_two_phase_sampling,
+        phase1_max_tokens=phase1_max_tokens,
+        context_window=context_window,
+        context_buffer=context_buffer,
     )
 
     trajectory_group = await do_group_rollout(env_group_builder, policy)
@@ -282,6 +297,7 @@ async def train_step(
 async def save_checkpoint_and_get_sampling_client(
     training_client: tinker.TrainingClient,
     batch_idx: int,
+    dataset_batch_idx: int,
     log_path: str,
     save_every: int,
     start_batch: int = 0,
@@ -315,7 +331,7 @@ async def save_checkpoint_and_get_sampling_client(
                 training_client=training_client,
                 name=f"{batch_idx:06d}",
                 log_path=log_path,
-                loop_state={"batch": batch_idx},
+                loop_state={"batch": batch_idx, "dataset_batch": dataset_batch_idx},
                 kind="both",
             )
             return training_client.create_sampling_client(path_dict["sampler_path"]), metrics
@@ -375,6 +391,7 @@ async def run_training_loop(
                 break
         if resume_info:
             start_batch = resume_info["batch"]
+            dataset_batch_idx = resume_info.get("dataset_batch", start_batch)
             logger.info(f"Resuming from specific batch {start_batch}")
         else:
             raise ValueError(f"No checkpoint found for batch {cfg.resume_from_batch}")
@@ -382,6 +399,7 @@ async def run_training_loop(
         # Starting new run from external checkpoint
         resume_info = None  # Don't use optimizer state from checkpoints file
         start_batch = cfg.start_batch
+        dataset_batch_idx = cfg.start_batch
         logger.info(f"Starting new run from external checkpoint at batch {start_batch}")
         logger.info(f"  Checkpoint: {cfg.load_checkpoint_path}")
     else:
@@ -389,9 +407,11 @@ async def run_training_loop(
         resume_info = checkpoint_utils.get_last_checkpoint(cfg.log_path)
         if resume_info:
             start_batch = resume_info["batch"]
+            dataset_batch_idx = resume_info.get("dataset_batch", start_batch)
             logger.info(f"Resuming from batch {start_batch}")
         else:
             start_batch = cfg.start_batch
+            dataset_batch_idx = cfg.start_batch
 
     # Create Tinker clients
     service_client = tinker.ServiceClient(base_url=cfg.base_url)
@@ -418,20 +438,44 @@ async def run_training_loop(
     logger.info("Using KernelBenchDatasetBuilder")
 
     train_dataset, test_dataset = await dataset_builder(tokenizer=tokenizer)
-    num_batches = len(train_dataset)
-    logger.info(f"Training on {num_batches} batches")
+    total_batches = len(train_dataset)
+    target_steps = total_batches
+    if cfg.max_steps is not None:
+        if cfg.max_steps < 0:
+            raise ValueError("max_steps must be >= 0")
+        target_steps = min(target_steps, cfg.max_steps)
+    logger.info(f"Training on up to {target_steps} steps")
+    if cfg.max_steps is not None and target_steps != total_batches:
+        logger.info(f"Capped training to {target_steps} steps with max_steps={cfg.max_steps}")
+
+    if start_batch >= target_steps or dataset_batch_idx >= total_batches:
+        logger.info("No training steps remaining")
+        if tb_logger:
+            tb_logger.flush()
+            tb_logger.close()
+        ml_logger.close()
+        return
 
     # Get initial sampling client
     sampling_client, _ = await save_checkpoint_and_get_sampling_client(
-        training_client, start_batch, cfg.log_path, cfg.save_every, start_batch
+        training_client,
+        start_batch,
+        dataset_batch_idx,
+        cfg.log_path,
+        cfg.save_every,
+        start_batch,
     )
 
     # Training loop
-    for batch_idx in range(start_batch, num_batches):
+    completed_steps = start_batch
+    while completed_steps < target_steps and dataset_batch_idx < total_batches:
+        batch_idx = dataset_batch_idx
+        step_idx = completed_steps
+        dataset_batch_idx += 1
         t_start = time.time()
         metrics = {
-            "progress/batch": batch_idx,
-            "progress/done_frac": (batch_idx + 1) / num_batches,
+            "progress/batch": step_idx,
+            "progress/done_frac": (step_idx + 1) / target_steps,
             "optim/lr": cfg.learning_rate,
         }
 
@@ -445,9 +489,14 @@ async def run_training_loop(
                     do_group_rollout_and_filter(
                         sampling_client,
                         builder,
+                        tokenizer=tokenizer,
                         max_tokens=cfg.max_tokens,
                         temperature=cfg.temperature,
                         do_remove_constant_reward_groups=cfg.remove_constant_reward_groups,
+                        use_two_phase_sampling=cfg.use_two_phase_sampling,
+                        phase1_max_tokens=cfg.phase1_max_tokens,
+                        context_window=cfg.context_window,
+                        context_buffer=cfg.context_buffer,
                     )
                     for builder in env_group_builders
                 ], return_exceptions=True)
@@ -464,7 +513,9 @@ async def run_training_loop(
                 trajectory_groups.append(tg)
 
         if len(trajectory_groups) == 0:
-            logger.warning(f"Batch {batch_idx}: All groups filtered out, skipping")
+            logger.warning(
+                f"Dataset batch {batch_idx}: All groups filtered out, skipping optimizer update"
+            )
             continue
 
         # Compute metrics
@@ -485,39 +536,52 @@ async def run_training_loop(
                 cfg.num_substeps,
                 cfg.loss_fn,
             )
+        completed_steps += 1
 
         # Save checkpoint and get new sampling client
         sampling_client, checkpoint_metrics = await save_checkpoint_and_get_sampling_client(
-            training_client, batch_idx + 1, cfg.log_path, cfg.save_every
+            training_client,
+            completed_steps,
+            dataset_batch_idx,
+            cfg.log_path,
+            cfg.save_every,
+            start_batch,
         )
         metrics.update(checkpoint_metrics)
 
         # Log metrics
         metrics["time/total"] = time.time() - t_start
-        ml_logger.log_metrics(metrics, step=batch_idx)
+        ml_logger.log_metrics(metrics, step=step_idx)
 
         # TensorBoard logging
         if tb_logger:
-            tb_logger.log_training_metrics(metrics, batch_idx)
-            tb_logger.log_trajectory_histograms(trajectory_groups, batch_idx)
-            tb_logger.log_per_level_metrics(trajectory_groups, batch_idx)
-            tb_logger.log_advantage_statistics(advantages, batch_idx)
+            tb_logger.log_training_metrics(metrics, step_idx)
+            tb_logger.log_trajectory_histograms(trajectory_groups, step_idx)
+            tb_logger.log_per_level_metrics(trajectory_groups, step_idx)
+            tb_logger.log_advantage_statistics(advantages, step_idx)
 
         logger.info(
-            f"Batch {batch_idx}/{num_batches}: "
+            f"Batch {completed_steps}/{target_steps}: "
             f"reward={metrics.get('reward/mean', 0):.3f}, "
             f"compile={metrics.get('kernel/compile_rate', 0):.1%}, "
             f"correct={metrics.get('kernel/correct_rate', 0):.1%}"
         )
 
+    if completed_steps < target_steps and dataset_batch_idx >= total_batches:
+        logger.warning(
+            "Dataset exhausted before reaching target steps: completed %s / %s",
+            completed_steps,
+            target_steps,
+        )
+
     # Save final checkpoint
-    if start_batch < num_batches:
+    if start_batch < completed_steps:
         await checkpoint_utils.save_checkpoint_async(
             training_client=training_client,
             name="final",
             log_path=cfg.log_path,
             kind="both",
-            loop_state={"batch": num_batches},
+            loop_state={"batch": completed_steps, "dataset_batch": dataset_batch_idx},
         )
 
     # Close loggers
