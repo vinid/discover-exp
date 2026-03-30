@@ -109,7 +109,6 @@ def main():
     logger.info(f"Level: {cfg.dataset_builder.level}")
     logger.info(f"Batch size: {cfg.dataset_builder.batch_size}")
     logger.info(f"Group size: {cfg.dataset_builder.group_size}")
-    logger.info(f"Max steps: {cfg.max_steps}")
     logger.info(f"Log path: {cfg.log_path}")
 
     # Run training

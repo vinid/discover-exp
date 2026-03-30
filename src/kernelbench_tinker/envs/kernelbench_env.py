@@ -140,7 +140,7 @@ class KernelBenchEnv(Env):
         self._current_observation = observation
         return observation, self.stop_condition
 
-    async def step(self, action: Action) -> StepResult:
+    async def step(self, action: Action, *, extra=None) -> StepResult:
         """
         Process the model's action (generated kernel code).
 
