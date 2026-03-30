@@ -47,8 +47,8 @@ log_path: "./runs/default"
 save_every: 2
 
 # Weights & Biases (optional)
-wandb_project: kernelbench-tinker
-wandb_name: kb-tinker-rl
+wandb_project: kernelbench-baseline
+wandb_name: kb-gptoss120b-baseline
 
 # =============================================================================
 # Dataset Builder Configuration
