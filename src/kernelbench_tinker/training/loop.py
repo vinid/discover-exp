@@ -371,11 +371,11 @@ async def run_training_loop(
         checkpoints = checkpoint_utils.load_checkpoints_file(cfg.log_path)
         resume_info = None
         for ckpt in checkpoints:
-            if ckpt.get("batch") == cfg.resume_from_batch and "state_path" in ckpt:
+            if ckpt.batch == cfg.resume_from_batch and ckpt.state_path is not None:
                 resume_info = ckpt
                 break
         if resume_info:
-            start_batch = resume_info["batch"]
+            start_batch = resume_info.batch
             logger.info(f"Resuming from specific batch {start_batch}")
         else:
             raise ValueError(f"No checkpoint found for batch {cfg.resume_from_batch}")
@@ -389,7 +389,7 @@ async def run_training_loop(
         # Resume from last checkpoint
         resume_info = checkpoint_utils.get_last_checkpoint(cfg.log_path)
         if resume_info:
-            start_batch = resume_info["batch"]
+            start_batch = resume_info.batch
             logger.info(f"Resuming from batch {start_batch}")
         else:
             start_batch = cfg.start_batch
@@ -400,7 +400,7 @@ async def run_training_loop(
     if resume_info:
         training_client = (
             await service_client.create_training_client_from_state_with_optimizer_async(
-                resume_info["state_path"]
+                resume_info.state_path
             )
         )
     elif cfg.load_checkpoint_path:
@@ -433,7 +433,7 @@ async def run_training_loop(
         t_start = time.time()
         metrics = {
             "progress/batch": batch_idx,
-            "progress/done_frac": (batch_idx + 1) / num_batches,
+            "progress/done_frac": (batch_idx + 1) / end_batch,
             "optim/lr": cfg.learning_rate,
         }
 
@@ -506,7 +506,7 @@ async def run_training_loop(
             tb_logger.log_advantage_statistics(advantages, batch_idx)
 
         logger.info(
-            f"Batch {batch_idx}/{num_batches}: "
+            f"Batch {batch_idx}/{end_batch}: "
             f"reward={metrics.get('reward/mean', 0):.3f}, "
             f"compile={metrics.get('kernel/compile_rate', 0):.1%}, "
             f"correct={metrics.get('kernel/correct_rate', 0):.1%}"
