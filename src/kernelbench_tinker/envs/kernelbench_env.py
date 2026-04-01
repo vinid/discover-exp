@@ -140,7 +140,7 @@ class KernelBenchEnv(Env):
         self._current_observation = observation
         return observation, self.stop_condition
 
-    async def step(self, action: Action) -> StepResult:
+    async def step(self, action: Action, *, extra=None) -> StepResult:
         """
         Process the model's action (generated kernel code).
 
@@ -153,7 +153,11 @@ class KernelBenchEnv(Env):
         step_start = time.perf_counter()
         # Parse the response to get text
         message, _ = self.renderer.parse_response(action)
-        response_text = message.get("content", "")
+        content = message.get("content", "")
+        if isinstance(content, list):
+            response_text = "".join(p["text"] for p in content if p.get("type") == "text")
+        else:
+            response_text = content
 
         # Parse structured response (extracts <KERNEL> block)
         parsed = parse_structured_response(response_text)
