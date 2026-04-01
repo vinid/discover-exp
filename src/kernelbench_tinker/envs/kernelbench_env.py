@@ -428,7 +428,7 @@ class KernelBenchDatasetBuilder(RLDatasetBuilder):
     """
 
     # Problem selection
-    levels: list[int] = chz.field(default_factory=lambda: [1, 2, 3, 4])
+    level: int = 1
     start_problem: int | None = None
     end_problem: int | None = None
     backend: str = "triton"
@@ -485,30 +485,30 @@ class KernelBenchDatasetBuilder(RLDatasetBuilder):
         Args:
             tokenizer: The tokenizer to use for the renderer. Required for most renderers.
         """
-        # Create problems across all levels
-        all_problems = []
-        for level in self.levels:
-            problem_ids = get_problem_ids(
-                level,
-                start=self.start_problem,
-                end=self.end_problem,
+        # Get problem IDs
+        problem_ids = get_problem_ids(
+            self.level,
+            start=self.start_problem,
+            end=self.end_problem,
+            dataset_src=self.dataset_src,
+        )
+
+        # Create problems
+        all_problems = [
+            KernelBenchProblem(
+                level=self.level,
+                problem_id=pid,
+                backend=self.backend,
                 dataset_src=self.dataset_src,
+                prompt_option=self.prompt_option,
+                prompt_precision=self.prompt_precision or self.precision,
+                prompt_include_hardware=self.prompt_include_hardware,
+                prompt_gpu_name=self.prompt_gpu_name or (
+                    self.modal_gpu_type if self.prompt_include_hardware else None
+                ),
             )
-            all_problems.extend([
-                KernelBenchProblem(
-                    level=level,
-                    problem_id=pid,
-                    backend=self.backend,
-                    dataset_src=self.dataset_src,
-                    prompt_option=self.prompt_option,
-                    prompt_precision=self.prompt_precision or self.precision,
-                    prompt_include_hardware=self.prompt_include_hardware,
-                    prompt_gpu_name=self.prompt_gpu_name or (
-                        self.modal_gpu_type if self.prompt_include_hardware else None
-                    ),
-                )
-                for pid in problem_ids
-            ])
+            for pid in problem_ids
+        ]
 
         # Split into train/test
         if self.test_fraction > 0 and len(all_problems) > 1:
